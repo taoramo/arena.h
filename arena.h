@@ -171,6 +171,14 @@ static inline void arena_release(Arena* arena) {
     }
 }
 
+static inline Arena *arena_create_scratch_default(void) {
+    const U64 reserve_size       = 256ULL * 1024 * 1024;
+    const U64 commit_granularity = 64ULL  * 1024;
+    const U64 initial_commit     = 64ULL  * 1024;
+    const U64 flags              = ARENA_FLAG_NONE;
+    return arena_create(reserve_size, commit_granularity, initial_commit, flags);
+}
+
 //======================================================================
 // Core Allocation
 //======================================================================
@@ -252,20 +260,13 @@ typedef struct TempArena {
     U64 pos;
 } TempArena;
 
-static inline TempArena temp_begin(Arena* a) {
+static inline TempArena arena_temp_begin(Arena* a) {
     return (TempArena){a, arena_pos(a)};
 }
-static inline void temp_end(TempArena t) {
+static inline void arena_temp_end(TempArena t) {
     arena_pop_to(t.arena, t.pos);
 }
 
-//======================================================================
-// Helpers: memcpy
-//======================================================================
-static inline void *arena_memcpy(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char*)dst; const unsigned char *s = (const unsigned char*)src;
-    while (n--) *d++ = *s++; return dst;
-}
 
 //======================================================================
 // String helpers using arena_push()
@@ -273,14 +274,14 @@ static inline void *arena_memcpy(void *dst, const void *src, size_t n) {
 static inline char *arena_strdup(Arena *a, const char *cstr) {
     size_t n = strlen(cstr);
     char *dup = (char*)arena_push(a, (U64)(n + 1), 1, false);
-    arena_memcpy(dup, cstr, n);
+    memcpy(dup, cstr, n);
     dup[n] = '\0';
     return dup;
 }
 
 static inline void *arena_memdup(Arena *a, const void *data, size_t size) {
     void *copy = arena_push(a, (U64)size, 8, false);
-    return arena_memcpy(copy, data, size);
+    return memcpy(copy, data, size);
 }
 
 static inline char *arena_vsprintf(Arena *a, const char *fmt, va_list args) {
@@ -311,7 +312,6 @@ static inline char *arena_sprintf(Arena *a, const char *fmt, ...) {
 #ifndef ARENA_DA_INIT_CAP
 #define ARENA_DA_INIT_CAP 8
 #endif
-#define cast_ptr(type) (type)(void*)
 
 static inline void* arena_realloc(Arena* a, void* old_ptr,
                                   size_t old_size, size_t new_size) {
@@ -320,7 +320,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
     void* new_ptr = arena_push(a, (U64)new_size, 8, false);
     ARENA_ASSERT(new_ptr != NULL);
     if (old_ptr && old_size > 0)
-        arena_memcpy(new_ptr, old_ptr, Min(old_size, new_size));
+        memcpy(new_ptr, old_ptr, Min(old_size, new_size));
     ARENA_DEBUG_LOG("arena_realloc: old=%p new=%p old_size=%zu new_size=%zu",
                     old_ptr, new_ptr, old_size, new_size);
     return new_ptr;
@@ -332,8 +332,8 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
         if ((da)->count >= (da)->capacity) {                                                  \
             size_t new_cap = (da)->capacity == 0 ? ARENA_DA_INIT_CAP : (da)->capacity*2;     \
             ARENA_ASSERT(new_cap > (da)->capacity);                                           \
-            (da)->items = cast_ptr((da)->items)arena_realloc(                                 \
-                (a), (da)->items,                                                             \
+            (da)->items = arena_realloc(                                 \
+                a, (da)->items,                                                             \
                 (da)->capacity*sizeof(*(da)->items),                                          \
                 new_cap*sizeof(*(da)->items));                                                \
             ARENA_ASSERT((da)->items != NULL);                                                \
@@ -352,7 +352,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
                 ARENA_ASSERT(cap < (SIZE_MAX/2));                                              \
                 cap *= 2;                                                                      \
             }                                                                                  \
-            (da)->items = cast_ptr((da)->items)arena_realloc(                                  \
+            (da)->items = arena_realloc(                                  \
                 (a), (da)->items,                                                              \
                 (da)->capacity*sizeof(*(da)->items),                                           \
                 cap*sizeof(*(da)->items));                                                     \
@@ -360,6 +360,70 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
             (da)->capacity = cap;                                                              \
             ARENA_DEBUG_LOG("da_grow_many: %p new_cap=%zu", (void*)(da)->items, cap);          \
         }                                                                                      \
-        arena_memcpy((da)->items + (da)->count, (new_items), (new_count)*sizeof(*(da)->items));\
+        memcpy((da)->items + (da)->count, (new_items), (new_count)*sizeof(*(da)->items));\
         (da)->count += (new_count);                                                            \
     } while (0)
+
+//======================================================================
+// Arena based helpers
+//======================================================================
+
+#include <dirent.h>   // opendir, readdir, closedir
+
+
+typedef struct StringArray {
+    char  **items;
+    size_t  count;
+    size_t  capacity;
+} StringArray;
+// List filenames in `path` into `out`.
+// All strings and the array storage are allocated on `arena`.
+// Returns true on success, false on error.
+static inline B32 arena_list_filenames(Arena *arena,
+                                       const char *path,
+                                       StringArray *out)
+{
+    ARENA_ASSERT(arena != NULL);
+    ARENA_ASSERT(path  != NULL);
+    ARENA_ASSERT(out   != NULL);
+
+    // Initialize the output array if needed
+    if (!out->items && out->capacity == 0 && out->count == 0) {
+        out->items    = NULL;
+        out->count    = 0;
+        out->capacity = 0;
+    }
+
+    DIR *dir = opendir(path);
+    if (!dir) {
+        fprintf(stderr, "arena_list_filenames: failed to open '%s': %s\n",
+                path, strerror(errno));
+        return false;
+    }
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+
+        // Skip "." and ".."
+        if (name[0] == '.' && (name[1] == '\0' ||
+                               (name[1] == '.' && name[2] == '\0'))) {
+            continue;
+        }
+
+        // If you want to skip hidden files, uncomment:
+        // if (name[0] == '.') continue;
+
+        char *name_copy = arena_strdup(arena, name);
+        if (!name_copy) {
+            fprintf(stderr, "arena_list_filenames: arena_strdup failed\n");
+            closedir(dir);
+            return false;
+        }
+
+        arena_da_append(arena, out, name_copy);
+    }
+
+    closedir(dir);
+    return true;
+}
