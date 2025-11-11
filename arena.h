@@ -310,7 +310,7 @@ static inline char *arena_sprintf(Arena *a, const char *fmt, ...) {
 // Arena-based Dynamic Arrays
 //======================================================================
 #ifndef ARENA_DA_INIT_CAP
-#define ARENA_DA_INIT_CAP 8
+#define ARENA_DA_INIT_CAP 64
 #endif
 
 static inline void* arena_realloc(Arena* a, void* old_ptr,
@@ -326,16 +326,32 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
     return new_ptr;
 }
 
+#ifdef __cplusplus
+    // C++: we have decltype, use static_cast to the same type as `like`
+    #define ARENA_CAST_LIKE(expr, like) \
+        static_cast<decltype(like)>(expr)
+#else
+    // C: implicit void* → T* conversion is fine, just return expr
+    // (or use a C-style cast if you really want)
+    #define ARENA_CAST_LIKE(expr, like) \
+        (expr)
+#endif
+
 #define arena_da_append(a, da, item)                                                          \
     do {                                                                                      \
         ARENA_ASSERT((da) != NULL);                                                           \
         if ((da)->count >= (da)->capacity) {                                                  \
-            size_t new_cap = (da)->capacity == 0 ? ARENA_DA_INIT_CAP : (da)->capacity*2;     \
+            size_t new_cap = (da)->capacity == 0 ? ARENA_DA_INIT_CAP : (da)->capacity * 2;    \
             ARENA_ASSERT(new_cap > (da)->capacity);                                           \
-            (da)->items = arena_realloc(                                 \
-                a, (da)->items,                                                             \
-                (da)->capacity*sizeof(*(da)->items),                                          \
-                new_cap*sizeof(*(da)->items));                                                \
+            (da)->items = ARENA_CAST_LIKE(                                                    \
+                arena_realloc(                                                                \
+                    (a),                                                                      \
+                    (da)->items,                                                              \
+                    (da)->capacity * sizeof(*(da)->items),                                    \
+                    new_cap * sizeof(*(da)->items)                                            \
+                ),                                                                            \
+                (da)->items                                                                   \
+            );                                                                                \
             ARENA_ASSERT((da)->items != NULL);                                                \
             (da)->capacity = new_cap;                                                         \
             ARENA_DEBUG_LOG("da_grow: %p new_cap=%zu", (void*)(da)->items, new_cap);          \
