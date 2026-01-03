@@ -317,19 +317,81 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
                                   size_t old_size, size_t new_size) {
     ARENA_ASSERT(a != NULL);
     ARENA_ASSERT(new_size > 0);
+
+    // 1. Handle NULL/Empty case: equivalent to malloc/arena_push
+    if (old_ptr == NULL || old_size == 0) {
+        return arena_push(a, (U64)new_size, 8, false);
+    }
+
+    Arena* current = a->current;
+    
+    // Calculate the physical end of the user's old data
+    U8* old_end = (U8*)old_ptr + old_size;
+    
+    // Calculate the current head of the arena allocation
+    // In your struct, 'pos' is the offset relative to the struct pointer 'current'
+    U8* arena_head = (U8*)current + current->pos;
+
+    // 2. CHECK: Is this the last thing allocated in the CURRENT block?
+    if (old_end == arena_head) {
+        // We are growing in place!
+        
+        // Handle shrinking (optimization: just give back the space)
+        if (new_size <= old_size) {
+            current->pos -= (old_size - new_size);
+            return old_ptr;
+        }
+
+        U64 diff = new_size - old_size;
+        U64 pos_pst = current->pos + diff;
+
+        // 3. CHECK: Do we have enough RESERVED space in this specific block?
+        // (We generally don't want to chain partially through an array)
+        if (pos_pst <= current->reserved_size) {
+            
+            // 4. COMMIT: Do we need to ask the OS for more RAM?
+            if (pos_pst > current->committed) {
+                U64 aligned = AlignUpPow2(pos_pst, current->commit_granularity);
+                U64 clamped = ClampTop(aligned, current->reserved_size);
+                U64 csize   = clamped - current->committed;
+                
+                if (csize > 0) {
+                    void* ptr = (U8*)current + current->committed;
+                    os_commit(ptr, csize);
+                    current->committed = clamped;
+                    AsanUnpoisonMemoryRegion(ptr, csize);
+                    ARENA_DEBUG_LOG("arena_realloc commit: %p +%lluKB", 
+                                    ptr, (unsigned long long)(csize >> 10));
+                }
+            }
+            
+            // Success: Update position
+            current->pos = pos_pst;
+            
+            // Unpoison the specific new region we just claimed
+            AsanUnpoisonMemoryRegion(old_end, diff);
+            
+            ARENA_DEBUG_LOG("arena_realloc: in-place grow old=%p new_size=%zu", 
+                            old_ptr, new_size);
+            return old_ptr;
+        }
+    }
+
+    // 5. Fallback: Allocated elsewhere, or boxed in, or out of reserved space.
+    // Allocate new, Copy, Return.
     void* new_ptr = arena_push(a, (U64)new_size, 8, false);
     ARENA_ASSERT(new_ptr != NULL);
-    if (old_ptr && old_size > 0)
-        memcpy(new_ptr, old_ptr, Min(old_size, new_size));
-    ARENA_DEBUG_LOG("arena_realloc: old=%p new=%p old_size=%zu new_size=%zu",
-                    old_ptr, new_ptr, old_size, new_size);
+    
+    memcpy(new_ptr, old_ptr, (old_size < new_size) ? old_size : new_size);
+    
+    ARENA_DEBUG_LOG("arena_realloc: copy-move old=%p new=%p", old_ptr, new_ptr);
     return new_ptr;
 }
 
 #ifdef __cplusplus
     // C++: we have decltype, use static_cast to the same type as `like`
     #define ARENA_CAST_LIKE(expr, like) \
-        static_cast<decltype(like)>(expr)
+<decltype(like)>(expr)
 #else
     // C: implicit void* → T* conversion is fine, just return expr
     // (or use a C-style cast if you really want)
@@ -337,7 +399,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
         (expr)
 #endif
 
-#define arena_da_append(a, da, item)                                                          \
+#define arena_da_append(arena, da, item)                                                          \
     do {                                                                                      \
         ARENA_ASSERT((da) != NULL);                                                           \
         if ((da)->count >= (da)->capacity) {                                                  \
@@ -345,7 +407,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
             ARENA_ASSERT(new_cap > (da)->capacity);                                           \
             (da)->items = ARENA_CAST_LIKE(                                                    \
                 arena_realloc(                                                                \
-                    (a),                                                                      \
+                    (arena),                                                                      \
                     (da)->items,                                                              \
                     (da)->capacity * sizeof(*(da)->items),                                    \
                     new_cap * sizeof(*(da)->items)                                            \
@@ -359,7 +421,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
         (da)->items[(da)->count++] = (item);                                                  \
     } while (0)
 
-#define arena_da_append_many(a, da, new_items, new_count)                                      \
+#define arena_da_append_many(arena, da, new_items, new_count)                                      \
     do {                                                                                       \
         ARENA_ASSERT((da) != NULL);                                                            \
         if ((da)->count + (new_count) > (da)->capacity) {                                      \
@@ -369,7 +431,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
                 cap *= 2;                                                                      \
             }                                                                                  \
             (da)->items = arena_realloc(                                  \
-                (a), (da)->items,                                                              \
+                (arena), (da)->items,                                                              \
                 (da)->capacity*sizeof(*(da)->items),                                           \
                 cap*sizeof(*(da)->items));                                                     \
             ARENA_ASSERT((da)->items != NULL);                                                 \
@@ -393,7 +455,6 @@ typedef struct StringArray {
     size_t  capacity;
 } StringArray;
 // List filenames in `path` into `out`.
-// All strings and the array storage are allocated on `arena`.
 // Returns true on success, false on error.
 static inline B32 arena_list_filenames(Arena *arena,
                                        const char *path,
@@ -403,12 +464,7 @@ static inline B32 arena_list_filenames(Arena *arena,
     ARENA_ASSERT(path  != NULL);
     ARENA_ASSERT(out   != NULL);
 
-    // Initialize the output array if needed
-    if (!out->items && out->capacity == 0 && out->count == 0) {
-        out->items    = NULL;
-        out->count    = 0;
-        out->capacity = 0;
-    }
+    out = {0};
 
     DIR *dir = opendir(path);
     if (!dir) {
