@@ -1,0 +1,6 @@
+# environment variables:
+AFL_CUSTOM_INFO_PROGRAM=./fuzz_arena_realloc
+AFL_CUSTOM_INFO_PROGRAM_ARGV=@@
+AFL_CUSTOM_INFO_OUT=out_realloc/default
+# command line:
+'../AFLplusplus/afl-fuzz' '-i' 'seeds' '-o' 'out_realloc' '--' './fuzz_arena_realloc' '@@'

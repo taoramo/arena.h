@@ -29,6 +29,10 @@
 #define ARENA_ENABLE_DEBUG 0
 #endif
 
+#ifndef ARENA_ABORT_ON_OOM
+#define ARENA_ABORT_ON_OOM 1
+#endif
+
 //======================================================================
 // Basic types and helpers
 //======================================================================
@@ -353,7 +357,8 @@ void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill) {
         if (zero_fill) memset(result, 0, size);
     } else {
         fprintf(stderr, "Arena push failed: insufficient commit.\n");
-        abort();
+        if (ARENA_ABORT_ON_OOM) abort();
+        return NULL;
     }
     return result;
 }
