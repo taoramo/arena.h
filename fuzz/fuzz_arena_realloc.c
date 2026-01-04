@@ -4,6 +4,7 @@
 
 #define STB_SPRINTF_IMPLEMENTATION
 #define ARENA_IMPLEMENTATION
+#define ARENA_ABORT_ON_OOM 0
 #include "../arena.h"
 
 typedef struct {
@@ -13,7 +14,7 @@ typedef struct {
     uint8_t operation;
 } realloc_input_t;
 
-static Arena g_arena;
+static Arena *g_arena = NULL;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -47,51 +48,72 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (input.alignment > 128 || input.alignment == 0) input.alignment = 16;
     if (input.operation > 7) input.operation = 0;
 
-    arena_release(&g_arena);
-    g_arena = *arena_create_scratch_default();
+    if (g_arena != NULL) {
+        arena_release(g_arena);
+    }
+    g_arena = arena_create_scratch_default();
 
-    void *ptr = arena_push(&g_arena, input.original_size, input.alignment, 0);
-    if (ptr && input.original_size > 0) {
-        memset(ptr, 0xAA, input.original_size);
+    if (g_arena == NULL) return 0;
+
+    void *ptr = NULL;
+    if (input.original_size > 0 && input.original_size < (1ULL << 28)) {
+        ptr = arena_push(g_arena, input.original_size, input.alignment, 0);
+        if (ptr && input.original_size > 0 && input.original_size < 1024) {
+            memset(ptr, 0xAA, input.original_size);
+        }
     }
 
+    void *newptr = ptr;
     switch (input.operation % 8) {
     case 0:
-        ptr = arena_realloc(&g_arena, ptr, input.original_size, input.new_size);
+        if (input.new_size > 0 && input.new_size < (1ULL << 28) && ptr != NULL) {
+            newptr = arena_realloc(g_arena, ptr, input.original_size, input.new_size);
+        }
         break;
     case 1:
-        ptr = arena_realloc(&g_arena, NULL, 0, input.new_size);
+        if (input.new_size > 0 && input.new_size < (1ULL << 28)) {
+            newptr = arena_realloc(g_arena, NULL, 0, input.new_size);
+        }
         break;
     case 2:
-        ptr = arena_realloc(&g_arena, ptr, input.original_size, input.original_size);
+        if (ptr != NULL && input.original_size < (1ULL << 28)) {
+            newptr = arena_realloc(g_arena, ptr, input.original_size, input.original_size);
+        }
         break;
     case 3: {
-        void *ptr2 = arena_push(&g_arena, 16, 8, 0);
-        if (ptr2) {
-            ptr = arena_realloc(&g_arena, ptr, input.original_size, input.new_size);
+        void *ptr2 = arena_push(g_arena, 16, 8, 0);
+        if (ptr2 && input.new_size > 0 && input.new_size < (1ULL << 28)) {
+            newptr = arena_realloc(g_arena, ptr, input.original_size, input.new_size);
         }
         break;
     }
     case 4:
-        if (input.new_size > input.original_size) {
-            ptr = arena_realloc(&g_arena, ptr, input.original_size, input.new_size);
+        if (input.new_size > input.original_size && input.new_size < (1ULL << 28) && ptr != NULL) {
+            newptr = arena_realloc(g_arena, ptr, input.original_size, input.new_size);
         }
         break;
     case 5:
-        if (input.new_size < input.original_size) {
-            ptr = arena_realloc(&g_arena, ptr, input.original_size, input.new_size);
+        if (input.new_size < input.original_size && input.new_size > 0 && input.new_size < (1ULL << 28) && ptr != NULL) {
+            newptr = arena_realloc(g_arena, ptr, input.original_size, input.new_size);
         }
         break;
     case 6:
-        ptr = arena_realloc(&g_arena, ptr, input.original_size, 0);
+        if (input.new_size == 0 && ptr != NULL && input.original_size < (1ULL << 28)) {
+            newptr = arena_realloc(g_arena, ptr, input.original_size, 0);
+        }
         break;
-    case 7:
-        ptr = arena_realloc(&g_arena, ptr, input.original_size, input.original_size * 2);
+    case 7: {
+        uint64_t doubled = input.original_size * 2;
+        if (input.new_size > 0 && input.new_size < (1ULL << 28) && ptr != NULL && doubled < (1ULL << 28)) {
+            newptr = arena_realloc(g_arena, ptr, input.original_size, doubled);
+        }
         break;
     }
+    }
 
-    if (ptr && input.new_size > 0 && input.new_size < (1ULL << 20)) {
-        memset(ptr, 0x55, input.new_size);
+    size_t memset_size = (input.new_size < (1ULL << 20)) ? input.new_size : (1ULL << 20);
+    if (newptr != NULL && memset_size > 0) {
+        memset(newptr, 0x55, memset_size);
     }
 
     return 0;

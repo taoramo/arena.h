@@ -12,7 +12,7 @@ typedef struct {
     uint8_t zero_fill;
 } push_input_t;
 
-static Arena g_arena;
+static Arena *g_arena;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -45,24 +45,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (input.alignment > 128 || input.alignment == 0) input.alignment = 16;
     if (input.zero_fill > 1) input.zero_fill = 0;
 
-    arena_release(&g_arena);
-    g_arena = *arena_create_scratch_default();
+    arena_release(g_arena);
+    g_arena = arena_create_scratch_default();
 
-    void *ptr = arena_push(&g_arena, input.size, input.alignment, input.zero_fill);
+    void *ptr = arena_push(g_arena, input.size, input.alignment, input.zero_fill);
     if (ptr && input.size > 0) {
         memset(ptr, 0xAA, input.size);
     }
 
-    void *ptr2 = arena_push(&g_arena, input.size, input.alignment ^ 0xFF, input.zero_fill ^ 0x01);
+    void *ptr2 = arena_push(g_arena, input.size, input.alignment ^ 0xFF, input.zero_fill ^ 0x01);
     if (ptr2 && input.size > 0) {
         memset(ptr2, 0x55, input.size);
     }
 
-    void *ptr3 = arena_push(&g_arena, input.size, input.alignment & 0x0F, 1);
+    void *ptr3 = arena_push(g_arena, input.size, input.alignment & 0x0F, 1);
     (void)ptr3;
 
     if (input.alignment == 0) {
-        ptr = arena_push(&g_arena, input.size, 1, input.zero_fill);
+        ptr = arena_push(g_arena, input.size, 1, input.zero_fill);
     }
 
     return 0;

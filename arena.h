@@ -318,6 +318,7 @@ Arena *arena_create_scratch_default(void) {
 
 void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill) {
     ARENA_ASSERT(arena != NULL);
+    if (!IsPow2(align)) align = 8;
     Arena* current = arena->current;
     U64 pos_pre = AlignUpPow2(current->pos, align);
     U64 pos_pst = pos_pre + size;

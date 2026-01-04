@@ -13,7 +13,7 @@ typedef struct {
     uint8_t pattern;
 } temp_input_t;
 
-static Arena g_arena;
+static Arena *g_arena;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -46,22 +46,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (input.alignment > 128 || input.alignment == 0) input.alignment = 16;
     if (input.nest_depth > 8) input.nest_depth = 4;
 
-    arena_release(&g_arena);
-    g_arena = *arena_create_scratch_default();
+    arena_release(g_arena);
+    g_arena = arena_create_scratch_default();
 
     TempArena temps[8];
     int depth = 0;
 
-    void *base_ptr = arena_push(&g_arena, input.alloc_size, input.alignment, 0);
+    void *base_ptr = arena_push(g_arena, input.alloc_size, input.alignment, 0);
     if (!base_ptr) {
         return 0;
     }
 
     for (int i = 0; i < (int)(input.nest_depth % 8) + 1; i++) {
-        temps[depth] = arena_temp_begin(&g_arena);
+        temps[depth] = arena_temp_begin(g_arena);
         depth++;
 
-        void *ptr = arena_push(&g_arena, input.alloc_size, input.alignment, 0);
+        void *ptr = arena_push(g_arena, input.alloc_size, input.alignment, 0);
         if (ptr && input.alloc_size > 0) {
             memset(ptr, input.pattern + i, input.alloc_size);
         }
@@ -79,10 +79,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     (void)base_ptr;
 
-    TempArena temp = arena_temp_begin(&g_arena);
-    void *ptr = arena_push(&g_arena, input.alloc_size, input.alignment, 0);
+    TempArena temp = arena_temp_begin(g_arena);
+    void *ptr = arena_push(g_arena, input.alloc_size, input.alignment, 0);
     if (ptr) {
-        arena_clear(&g_arena);
+        arena_clear(g_arena);
         arena_temp_end(temp);
     }
 

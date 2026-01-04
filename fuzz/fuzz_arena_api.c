@@ -15,7 +15,7 @@ typedef struct {
   uint64_t pos;
 } fuzz_input_t;
 
-static Arena g_arena;
+static Arena *g_arena;
 
 void reset_arena(void);
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -40,8 +40,8 @@ int main(int argc, char **argv) {
 #endif
 
 void reset_arena(void) {
-  arena_release(&g_arena);
-  g_arena = *arena_create_scratch_default();
+  arena_release(g_arena);
+  g_arena = arena_create_scratch_default();
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
@@ -67,7 +67,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   switch (input.operation % 12) {
   case 0: {
     void *ptr =
-        arena_push(&g_arena, input.size, input.alignment, input.zero_fill);
+        arena_push(g_arena, input.size, input.alignment, input.zero_fill);
     if (ptr && payload_size >= input.size) {
       memcpy(ptr, payload,
              payload_size < input.size ? payload_size : input.size);
@@ -76,28 +76,28 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   case 1: {
     void *ptr =
-        arena_push(&g_arena, input.size, input.alignment, input.zero_fill);
+        arena_push(g_arena, input.size, input.alignment, input.zero_fill);
     if (ptr) {
-      void *newptr = arena_realloc(&g_arena, ptr, input.size, input.size + 1);
+      void *newptr = arena_realloc(g_arena, ptr, input.size, input.size + 1);
       (void)newptr;
     }
     break;
   }
   case 2: {
-    U64 pos = arena_pos(&g_arena);
-    if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+    U64 pos = arena_pos(g_arena);
+    if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
         NULL) {
-      arena_pop_to(&g_arena, pos);
+      arena_pop_to(g_arena, pos);
     }
     break;
   }
   case 3: {
-    arena_clear(&g_arena);
+    arena_clear(g_arena);
     break;
   }
   case 4: {
-    TempArena temp = arena_temp_begin(&g_arena);
-    if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+    TempArena temp = arena_temp_begin(g_arena);
+    if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
         NULL) {
       arena_temp_end(temp);
     }
@@ -107,61 +107,61 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (payload_size > 0) {
       char temp_str[257] = {0};
       memcpy(temp_str, payload, payload_size < 256 ? payload_size : 256);
-      char *str = arena_strdup(&g_arena, temp_str);
+      char *str = arena_strdup(g_arena, temp_str);
       (void)str;
     }
     break;
   }
   case 6: {
     char *str =
-        arena_sprintf(&g_arena, "test %llu %u", input.size, input.alignment);
+        arena_sprintf(g_arena, "test %llu %u", input.size, input.alignment);
     (void)str;
     break;
   }
   case 7: {
-    void *ptr = arena_push(&g_arena, input.size, input.alignment, 1);
+    void *ptr = arena_push(g_arena, input.size, input.alignment, 1);
     (void)ptr;
     break;
   }
   case 8: {
-    U64 pos1 = arena_pos(&g_arena);
-    if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+    U64 pos1 = arena_pos(g_arena);
+    if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
         NULL) {
-      U64 pos2 = arena_pos(&g_arena);
-      arena_pop_to(&g_arena, pos1);
-      if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+      U64 pos2 = arena_pos(g_arena);
+      arena_pop_to(g_arena, pos1);
+      if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
           NULL) {
-        arena_pop_to(&g_arena, pos2);
+        arena_pop_to(g_arena, pos2);
       }
     }
     break;
   }
   case 9: {
     void *ptr =
-        arena_push(&g_arena, input.size, input.alignment, input.zero_fill);
+        arena_push(g_arena, input.size, input.alignment, input.zero_fill);
     if (ptr && input.size > 0) {
-      arena_memdup(&g_arena, ptr, input.size);
+      arena_memdup(g_arena, ptr, input.size);
     }
     break;
   }
   case 10: {
-    U64 pos = arena_pos(&g_arena);
-    if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+    U64 pos = arena_pos(g_arena);
+    if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
         NULL) {
-      arena_clear(&g_arena);
+      arena_clear(g_arena);
     }
-    if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+    if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
         NULL) {
       (void)pos;
     }
     break;
   }
   case 11: {
-    TempArena temp = arena_temp_begin(&g_arena);
-    if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+    TempArena temp = arena_temp_begin(g_arena);
+    if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
         NULL) {
-      TempArena temp2 = arena_temp_begin(&g_arena);
-      if (arena_push(&g_arena, input.size, input.alignment, input.zero_fill) !=
+      TempArena temp2 = arena_temp_begin(g_arena);
+      if (arena_push(g_arena, input.size, input.alignment, input.zero_fill) !=
           NULL) {
         arena_temp_end(temp2);
       }
