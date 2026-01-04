@@ -13,15 +13,9 @@
 //======================================================================
 
 #pragma once
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <string.h>
-#include <errno.h>
-#include <stdarg.h>
+#ifndef ARENA_H
+#define ARENA_H
+#include "base.h"
 
 //======================================================================
 // Configuration Flags
@@ -33,14 +27,9 @@
 //======================================================================
 // Basic types and helpers
 //======================================================================
-typedef uint64_t U64;
-typedef uint8_t  U8;
-typedef bool     B32;
 
 #define ARENA_HEADER_SIZE (sizeof(struct Arena))
 #define AlignUpPow2(x,a) (((x)+((a)-1))&~((a)-1))
-#define ClampTop(x,t)    ((x)>(t)?(t):(x))
-#define Min(a,b)         ((a)<(b)?(a):(b))
 
 //======================================================================
 // Debug System
@@ -108,13 +97,13 @@ typedef struct Arena {
 //======================================================================
 // OS Memory Interface (Linux)
 //======================================================================
-static inline void* os_reserve(U64 size) {
+internal void* os_reserve(U64 size) {
     void* ptr = mmap(NULL, size, PROT_NONE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return (ptr == MAP_FAILED) ? NULL : ptr;
 }
 
-static inline void os_commit(void* ptr, U64 size) {
+internal void os_commit(void* ptr, U64 size) {
     size = AlignUpPow2(size, (U64)getpagesize());
     if (mprotect(ptr, size, PROT_READ | PROT_WRITE) != 0) {
         fprintf(stderr, "os_commit failed: %s\n", strerror(errno));
@@ -122,14 +111,14 @@ static inline void os_commit(void* ptr, U64 size) {
     }
 }
 
-static inline void os_release(void* ptr, U64 size) {
+internal void os_release(void* ptr, U64 size) {
     munmap(ptr, size);
 }
 
 //======================================================================
 // Arena Lifecycle
 //======================================================================
-static inline Arena* arena_create(U64 reserve_size, U64 commit_granularity,
+internal Arena* arena_create(U64 reserve_size, U64 commit_granularity,
                                   U64 initial_commit, U64 flags) {
     reserve_size       = AlignUpPow2(reserve_size, (U64)getpagesize());
     commit_granularity = AlignUpPow2(commit_granularity, (U64)getpagesize());
@@ -162,7 +151,7 @@ static inline Arena* arena_create(U64 reserve_size, U64 commit_granularity,
     return a;
 }
 
-static inline void arena_release(Arena* arena) {
+internal void arena_release(Arena* arena) {
     for (Arena* a = arena->current; a; ) {
         Arena* prev = a->prev;
         ARENA_DEBUG_LOG("arena_release: %p (%.2f MB)", (void*)a, a->reserved_size / (1024.0*1024.0));
@@ -171,7 +160,7 @@ static inline void arena_release(Arena* arena) {
     }
 }
 
-static inline Arena *arena_create_scratch_default(void) {
+internal Arena *arena_create_scratch_default(void) {
     const U64 reserve_size       = 256ULL * 1024 * 1024;
     const U64 commit_granularity = 64ULL  * 1024;
     const U64 initial_commit     = 64ULL  * 1024;
@@ -182,7 +171,7 @@ static inline Arena *arena_create_scratch_default(void) {
 //======================================================================
 // Core Allocation
 //======================================================================
-static inline void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill) {
+internal void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill) {
     ARENA_ASSERT(arena != NULL);
     Arena* current = arena->current;
     U64 pos_pre = AlignUpPow2(current->pos, align);
@@ -231,7 +220,7 @@ static inline void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill)
 //======================================================================
 // Pop / Clear
 //======================================================================
-static inline void arena_pop_to(Arena* arena, U64 pos) {
+internal void arena_pop_to(Arena* arena, U64 pos) {
     ARENA_ASSERT(arena);
     Arena* current = arena->current;
 
@@ -249,8 +238,8 @@ static inline void arena_pop_to(Arena* arena, U64 pos) {
     }
 }
 
-static inline void arena_clear(Arena* arena) { arena_pop_to(arena, ARENA_HEADER_SIZE); }
-static inline U64  arena_pos(Arena* arena)   { return arena->current->pos; }
+internal void arena_clear(Arena* arena) { arena_pop_to(arena, ARENA_HEADER_SIZE); }
+internal U64  arena_pos(Arena* arena)   { return arena->current->pos; }
 
 //======================================================================
 // Temporary Scopes
@@ -260,18 +249,17 @@ typedef struct TempArena {
     U64 pos;
 } TempArena;
 
-static inline TempArena arena_temp_begin(Arena* a) {
+internal TempArena arena_temp_begin(Arena* a) {
     return (TempArena){a, arena_pos(a)};
 }
-static inline void arena_temp_end(TempArena t) {
+internal void arena_temp_end(TempArena t) {
     arena_pop_to(t.arena, t.pos);
 }
-
 
 //======================================================================
 // String helpers using arena_push()
 //======================================================================
-static inline char *arena_strdup(Arena *a, const char *cstr) {
+internal char *arena_strdup(Arena *a, const char *cstr) {
     size_t n = strlen(cstr);
     char *dup = (char*)arena_push(a, (U64)(n + 1), 1, false);
     memcpy(dup, cstr, n);
@@ -279,15 +267,15 @@ static inline char *arena_strdup(Arena *a, const char *cstr) {
     return dup;
 }
 
-static inline void *arena_memdup(Arena *a, const void *data, size_t size) {
+internal void *arena_memdup(Arena *a, const void *data, size_t size) {
     void *copy = arena_push(a, (U64)size, 8, false);
     return memcpy(copy, data, size);
 }
 
-static inline char *arena_vsprintf(Arena *a, const char *fmt, va_list args) {
+internal char *arena_vsprintf(Arena *a, const char *fmt, va_list args) {
     va_list copy;
     va_copy(copy, args);
-    int n = vsnprintf(NULL, 0, fmt, copy);
+    int n = stbsp_vsnprintf(NULL, 0, fmt, copy);
     va_end(copy);
 
     if (n < 0) {
@@ -299,7 +287,7 @@ static inline char *arena_vsprintf(Arena *a, const char *fmt, va_list args) {
     return buf;
 }
 
-static inline char *arena_sprintf(Arena *a, const char *fmt, ...) {
+internal char *arena_sprintf(Arena *a, const char *fmt, ...) {
     va_list args; va_start(args, fmt);
     char *res = arena_vsprintf(a, fmt, args);
     va_end(args);
@@ -313,7 +301,7 @@ static inline char *arena_sprintf(Arena *a, const char *fmt, ...) {
 #define ARENA_DA_INIT_CAP 64
 #endif
 
-static inline void* arena_realloc(Arena* a, void* old_ptr,
+internal void* arena_realloc(Arena* a, void* old_ptr,
                                   size_t old_size, size_t new_size) {
     ARENA_ASSERT(a != NULL);
     ARENA_ASSERT(new_size > 0);
@@ -390,8 +378,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
 
 #ifdef __cplusplus
     // C++: we have decltype, use static_cast to the same type as `like`
-    #define ARENA_CAST_LIKE(expr, like) \
-<decltype(like)>(expr)
+#define ARENA_CAST_LIKE(expr, like) ((__typeof__(like))(expr))
 #else
     // C: implicit void* → T* conversion is fine, just return expr
     // (or use a C-style cast if you really want)
@@ -399,7 +386,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
         (expr)
 #endif
 
-#define arena_da_append(arena, da, item)                                                          \
+#define arena_da_append(a, da, item)                                                          \
     do {                                                                                      \
         ARENA_ASSERT((da) != NULL);                                                           \
         if ((da)->count >= (da)->capacity) {                                                  \
@@ -407,7 +394,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
             ARENA_ASSERT(new_cap > (da)->capacity);                                           \
             (da)->items = ARENA_CAST_LIKE(                                                    \
                 arena_realloc(                                                                \
-                    (arena),                                                                      \
+                    (a),                                                                      \
                     (da)->items,                                                              \
                     (da)->capacity * sizeof(*(da)->items),                                    \
                     new_cap * sizeof(*(da)->items)                                            \
@@ -421,7 +408,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
         (da)->items[(da)->count++] = (item);                                                  \
     } while (0)
 
-#define arena_da_append_many(arena, da, new_items, new_count)                                      \
+#define arena_da_append_many(a, da, new_items, new_count)                                      \
     do {                                                                                       \
         ARENA_ASSERT((da) != NULL);                                                            \
         if ((da)->count + (new_count) > (da)->capacity) {                                      \
@@ -431,7 +418,7 @@ static inline void* arena_realloc(Arena* a, void* old_ptr,
                 cap *= 2;                                                                      \
             }                                                                                  \
             (da)->items = arena_realloc(                                  \
-                (arena), (da)->items,                                                              \
+                (a), (da)->items,                                                              \
                 (da)->capacity*sizeof(*(da)->items),                                           \
                 cap*sizeof(*(da)->items));                                                     \
             ARENA_ASSERT((da)->items != NULL);                                                 \
@@ -456,7 +443,7 @@ typedef struct StringArray {
 } StringArray;
 // List filenames in `path` into `out`.
 // Returns true on success, false on error.
-static inline B32 arena_list_filenames(Arena *arena,
+internal B32 arena_list_filenames(Arena *arena,
                                        const char *path,
                                        StringArray *out)
 {
@@ -464,7 +451,7 @@ static inline B32 arena_list_filenames(Arena *arena,
     ARENA_ASSERT(path  != NULL);
     ARENA_ASSERT(out   != NULL);
 
-    out = {0};
+    MemoryZeroStruct(out);
 
     DIR *dir = opendir(path);
     if (!dir) {
@@ -499,3 +486,42 @@ static inline B32 arena_list_filenames(Arena *arena,
     closedir(dir);
     return true;
 }
+
+internal StringArray arena_split(Arena *arena, const char *str, const char *delimiters) {
+    ARENA_ASSERT(arena != NULL);
+    ARENA_ASSERT(str != NULL);
+    ARENA_ASSERT(delimiters != NULL);
+
+    StringArray result;
+    MemoryZeroStruct(&result);
+
+    const char *start = str;
+    while (*start != '\0') {
+        const char *end = start;
+        while (*end != '\0' && !strchr(delimiters, *end)) {
+            end++;
+        }
+
+        size_t len = end - start;
+        if (len > 0) {
+            char *token = (char*)arena_push(arena, (U64)(len + 1), 1, 0);
+            memcpy(token, start, len);
+            token[len] = '\0';
+            arena_da_append(arena, &result, token);
+        }
+
+        start = end;
+        while (*start != '\0' && strchr(delimiters, *start)) {
+            start++;
+        }
+    }
+
+    return result;
+}
+
+#define push_array_no_zero_aligned(a, T, c, align) (T *)arena_push((a), sizeof(T)*(c), (align), (0))
+#define push_array_aligned(a, T, c, align) (T *)arena_push((a), sizeof(T)*(c), (align), (1))
+#define push_array_no_zero(a, T, c) push_array_no_zero_aligned(a, T, c, Max(8, AlignOf(T)))
+#define push_array(a, T, c) push_array_aligned(a, T, c, Max(8, AlignOf(T)))
+
+#endif
