@@ -4,6 +4,7 @@
 
 #define STB_SPRINTF_IMPLEMENTATION
 #define ARENA_IMPLEMENTATION
+#define ARENA_ABORT_ON_OOM 0
 #include "../arena.h"
 
 typedef struct {
@@ -13,7 +14,7 @@ typedef struct {
     uint8_t pattern;
 } temp_input_t;
 
-static Arena *g_arena;
+static Arena *g_arena = NULL;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -43,11 +44,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     memcpy(&input, data, sizeof(temp_input_t));
 
     if (input.alloc_size > (1ULL << 30)) input.alloc_size = 0;
-    if (input.alignment > 128 || input.alignment == 0) input.alignment = 16;
+    // Validate alignment is a power of 2
+    if (input.alignment == 0 || (input.alignment & (input.alignment - 1)) != 0) {
+      input.alignment = 16;  // Default to 16-byte alignment
+    }
     if (input.nest_depth > 8) input.nest_depth = 4;
 
-    arena_release(g_arena);
+    if (g_arena != NULL) {
+        arena_release(g_arena);
+    }
     g_arena = arena_create_scratch_default();
+
+    if (g_arena == NULL || g_arena->current == NULL) return 0;
 
     TempArena temps[8];
     int depth = 0;

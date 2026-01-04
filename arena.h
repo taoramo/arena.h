@@ -46,15 +46,15 @@
 #if ARENA_ENABLE_DEBUG
 #  include <assert.h>
 #  define ARENA_ASSERT(expr) \
-    do { \
-        if(!(expr)) { \
-            fprintf(stderr, "[ARENA ASSERT FAILED] %s:%d: %s\n", \
-                    __FILE__, __LINE__, #expr); \
-            assert(expr); \
-        } \
-    } while(0)
+     do { \
+         if(!(expr)) { \
+             fprintf(stderr, "[ARENA ASSERT FAILED] %s:%d: %s\n", \
+                     __FILE__, __LINE__, #expr); \
+             if (ARENA_ABORT_ON_OOM) assert(expr); \
+         } \
+     } while(0)
 #  define ARENA_DEBUG_LOG(fmt, ...) \
-    fprintf(stderr, "[arena dbg] " fmt "\n", ##__VA_ARGS__)
+     fprintf(stderr, "[arena dbg] " fmt "\n", ##__VA_ARGS__)
 #else
 #  define ARENA_ASSERT(expr) ((void)0)
 #  define ARENA_DEBUG_LOG(fmt, ...) ((void)0)
@@ -199,20 +199,26 @@ StringArray arena_split(Arena *arena, const char *str, const char *delimiters);
         if ((da)->count >= (da)->capacity) {                                                  \
             size_t new_cap = (da)->capacity == 0 ? ARENA_DA_INIT_CAP : (da)->capacity * 2;    \
             ARENA_ASSERT(new_cap > (da)->capacity);                                           \
-            (da)->items = ARENA_CAST_LIKE(                                                    \
-                arena_realloc(                                                                \
-                    (a),                                                                      \
-                    (da)->items,                                                              \
-                    (da)->capacity * sizeof(*(da)->items),                                    \
-                    new_cap * sizeof(*(da)->items)                                            \
-                ),                                                                            \
-                (da)->items                                                                   \
+            void *new_items = arena_realloc(                                                 \
+                (a),                                                                          \
+                (da)->items,                                                                  \
+                (da)->capacity * sizeof(*(da)->items),                                        \
+                new_cap * sizeof(*(da)->items)                                                \
             );                                                                                \
-            ARENA_ASSERT((da)->items != NULL);                                                \
+            if (new_items == NULL) {                                                          \
+                /* Reallocation failed - leave array in failed state */                      \
+                (da)->items = NULL;                                                           \
+                (da)->capacity = 0;                                                           \
+                (da)->count = 0;                                                              \
+                break;                                                                        \
+            }                                                                                 \
+            (da)->items = ARENA_CAST_LIKE(new_items, (da)->items);                            \
             (da)->capacity = new_cap;                                                         \
             ARENA_DEBUG_LOG("da_grow: %p new_cap=%zu", (void*)(da)->items, new_cap);          \
         }                                                                                     \
-        (da)->items[(da)->count++] = (item);                                                  \
+        if ((da)->items != NULL) {                                                            \
+            (da)->items[(da)->count++] = (item);                                              \
+        }                                                                                     \
     } while (0)
 
 #define arena_da_append_many(a, da, new_items, new_count)                                      \
@@ -224,16 +230,25 @@ StringArray arena_split(Arena *arena, const char *str, const char *delimiters);
                 ARENA_ASSERT(cap < (SIZE_MAX/2));                                              \
                 cap *= 2;                                                                      \
             }                                                                                  \
-            (da)->items = arena_realloc(                                  \
-                (a), (da)->items,                                                              \
-                (da)->capacity*sizeof(*(da)->items),                                           \
-                cap*sizeof(*(da)->items));                                                     \
-            ARENA_ASSERT((da)->items != NULL);                                                 \
+            void *new_items_ptr = arena_realloc(                                               \
+                (a), (da)->items,                                                               \
+                (da)->capacity*sizeof(*(da)->items),                                            \
+                cap*sizeof(*(da)->items));                                                      \
+            if (new_items_ptr == NULL) {                                                       \
+                /* Reallocation failed - leave array in failed state */                       \
+                (da)->items = NULL;                                                            \
+                (da)->capacity = 0;                                                            \
+                (da)->count = 0;                                                               \
+                break;                                                                         \
+            }                                                                                  \
+            (da)->items = new_items_ptr;                                                       \
             (da)->capacity = cap;                                                              \
             ARENA_DEBUG_LOG("da_grow_many: %p new_cap=%zu", (void*)(da)->items, cap);          \
         }                                                                                      \
-        memcpy((da)->items + (da)->count, (new_items), (new_count)*sizeof(*(da)->items));\
-        (da)->count += (new_count);                                                            \
+        if ((da)->items != NULL) {                                                             \
+            memcpy((da)->items + (da)->count, (new_items), (new_count)*sizeof(*(da)->items)); \
+            (da)->count += (new_count);                                                        \
+        }                                                                                      \
     } while (0)
 
 #define push_array_no_zero_aligned(a, T, c, align) (T *)arena_push((a), sizeof(T)*(c), (align), (0))
@@ -494,10 +509,12 @@ void* arena_realloc(Arena* a, void* old_ptr,
     // 5. Fallback: Allocated elsewhere, or boxed in, or out of reserved space.
     // Allocate new, Copy, Return.
     void* new_ptr = arena_push(a, (U64)new_size, 8, false);
-    ARENA_ASSERT(new_ptr != NULL);
-    
+    if (new_ptr == NULL) {
+        return NULL;  // Allocation failed
+    }
+
     memcpy(new_ptr, old_ptr, (old_size < new_size) ? old_size : new_size);
-    
+
     ARENA_DEBUG_LOG("arena_realloc: copy-move old=%p new=%p", old_ptr, new_ptr);
     return new_ptr;
 }

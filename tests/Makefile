@@ -83,3 +83,4 @@ run-asan-poisoning: test-asan-poisoning
 
 clean:
 	rm -f $(TEST_BINS) $(DEBUG_BINS) $(ASAN_BINS) $(VALGRIND_BINS)
+	rm -rf *_debug.out.dSYM

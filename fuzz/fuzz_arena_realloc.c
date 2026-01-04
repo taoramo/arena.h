@@ -45,14 +45,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     if (input.original_size > (1ULL << 30)) input.original_size = 0;
     if (input.new_size > (1ULL << 30)) input.new_size = 0;
-    if (input.alignment > 128 || input.alignment == 0) input.alignment = 16;
+    // Validate alignment is a power of 2
+    if (input.alignment == 0 || (input.alignment & (input.alignment - 1)) != 0) {
+        input.alignment = 16;  // Default to 16-byte alignment
+    }
     if (input.operation > 7) input.operation = 0;
 
     if (g_arena != NULL) {
         arena_release(g_arena);
     }
     g_arena = arena_create_scratch_default();
-
     if (g_arena == NULL) return 0;
 
     void *ptr = NULL;
@@ -111,9 +113,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
     }
 
-    size_t memset_size = (input.new_size < (1ULL << 20)) ? input.new_size : (1ULL << 20);
-    if (newptr != NULL && memset_size > 0) {
-        memset(newptr, 0x55, memset_size);
+    // Only memset if realloc succeeded or if we're using the original allocation
+    if (newptr != NULL) {
+        size_t actual_size = (newptr == ptr) ? input.original_size : input.new_size;
+        size_t memset_size = (actual_size < (1ULL << 20)) ? actual_size : (1ULL << 20);
+        if (memset_size > 0) {
+            memset(newptr, 0x55, memset_size);
+        }
     }
 
     return 0;

@@ -42,7 +42,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     memcpy(&input, data, sizeof(push_input_t));
 
     if (input.size > (1ULL << 30)) return 0;
-    if (input.alignment > 128 || input.alignment == 0) input.alignment = 16;
+    // Validate alignment is a power of 2
+    if (input.alignment == 0 || (input.alignment & (input.alignment - 1)) != 0) {
+      input.alignment = 16;  // Default to 16-byte alignment
+    }
     if (input.zero_fill > 1) input.zero_fill = 0;
 
     arena_release(g_arena);

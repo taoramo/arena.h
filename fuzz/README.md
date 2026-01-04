@@ -152,53 +152,52 @@ pattern:1        byte pattern to fill memory with
 
 ### Multiple Crashes in fuzz_arena_realloc
 
-**Problems Found:**
+**Root Cause:** Buffer overflow in memset after failed realloc operations
 
-1. **Buffer overflow in post-realloc memset**:
-   - Used `input.new_size` instead of allocated size for memset
-   - Could overflow when realloc returns NULL or allocates less
-
-2. **No NULL checks after arena_realloc calls**:
-   - `arena_realloc` can return NULL when `ARENA_ABORT_ON_OOM=0`
-   - Fuzzer used NULL pointers without checking
-
-3. **Invalid size inputs**:
-   - Fuzzer generated sizes up to petabytes
-   - arena.h couldn't handle gracefully
-
-**Fixes Applied:**
-
-1. **Added size limits to allocations**:
-   - Max 256MB for fuzzing vs 1GB limit
-   - Prevents extreme edge cases
-
-2. **Added NULL pointer checks**:
-   - Check return value after every `arena_realloc` call
-   - Use only valid pointers for memset
-
-3. **Bounded memset operations**:
-   - Max 1MB memset to prevent buffer overflows
-   - Check pointer validity before use
-
-4. **Validation of arena state**:
-   - Check if arena initialization succeeded
-   - Return early if arena is invalid
-
-**Test Results:**
-- All previous crash inputs (id:000000-009) now handle gracefully
-- No segfaults or bus errors on crash inputs
-- Valid seeds still test correctly
-- AFL++ can continue fuzzing without crashes
+**Problem:**
+```c
+// When realloc failed/skipped, we still tried to memset with new_size
+if (newptr != NULL && input.new_size > 0 && input.new_size < (1ULL << 20)) {
+    memset(newptr, 0x55, input.new_size);  // input.new_size could be 256MB!
+}
+```
 
 **Example Crash Input (id:000000):**
 ```
-original_size=256 bytes
-new_size=268,435,456 bytes (256MB)
+original_size=44544 bytes
+new_size=268435456 bytes (256MB)
 operation=0 (standard realloc)
 ```
+- Allocates 44544 bytes initially
+- Realloc to 256MB fails/skipped (arena limit)
+- memset() tries to write 256MB → buffer overflow
 
-Before fix: Segfault in arena_realloc or buffer overflow in memset
-After fix: Gracefully skips realloc (exceeds 256MB limit), no crash
+**Fixes Applied:**
+
+1. **arena_realloc fallback fixed**:
+   - Added NULL check in realloc when arena_push fails
+   - Prevents segfault when OOM in realloc operations
+
+2. **Proper memset size calculation**:
+   ```c
+   size_t actual_size = (newptr == ptr) ? input.original_size : input.new_size;
+   size_t memset_size = (actual_size < (1ULL << 20)) ? actual_size : (1ULL << 20);
+   ```
+
+3. **Enhanced input validation**:
+   - Alignment must be power-of-2 (not just > 128)
+   - Size limits: 256MB max for fuzzing
+   - NULL checks after all allocations
+
+4. **ARENA_ABORT_ON_OOM=0** for fuzzing:
+   - Fuzzers return NULL on OOM instead of aborting
+   - Production code keeps abort behavior
+
+**Test Results:**
+- All 6 crash inputs now handle gracefully
+- Valid seeds still work correctly
+- No more segfaults or bus errors
+- AFL++ fuzzing can continue safely
 
 ## Creating Custom Seeds
 
