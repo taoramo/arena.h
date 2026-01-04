@@ -1,0 +1,43 @@
+# Valgrind suppressions for arena.h tests
+# These suppress known false positives or acceptable memory patterns
+
+{
+   <suppression_name>
+   Memcheck:Leak
+   ...
+   fun:acutest_*
+}
+
+# Suppress reachable memory from mmap (arena uses mmap)
+{
+   <suppression_name>
+   Memcheck:Leak
+   ...
+   fun:mmap
+   fun:arena_*
+}
+
+# Suppress leaked memory from munmap during arena_release
+{
+   <suppression_name>
+   Memcheck:Leak
+   ...
+   fun:munmap
+}
+
+# Suppress possible false positives in test helpers
+{
+   <suppression_name>
+   Memcheck:Addr4
+   ...
+   fun:test_*
+}
+
+# Suppress system call false positives on macOS
+{
+   <suppression_name>
+   Memcheck:Param
+   ...
+   fun:mmap
+   fun:_platform_bzero$VARIANT$Darwin
+}

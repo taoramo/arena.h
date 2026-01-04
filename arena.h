@@ -10,6 +10,11 @@
 //  - Tsoding-style dynamic arrays with arena-based growth
 //
 // Compile with -DARENA_ENABLE_DEBUG=1 to enable logs + assertions
+//
+// USAGE:
+//   #define ARENA_IMPLEMENTATION
+//   #include "arena.h"
+//   in EXACTLY ONE source file before including this header
 //======================================================================
 
 #pragma once
@@ -95,15 +100,157 @@ typedef struct Arena {
 } Arena;
 
 //======================================================================
+// Temporary Scopes
+//======================================================================
+typedef struct TempArena {
+    Arena* arena;
+    U64 pos;
+} TempArena;
+
+//======================================================================
+// Arena based helpers
+//======================================================================
+
+typedef struct StringArray {
+    char  **items;
+    size_t  count;
+    size_t  capacity;
+} StringArray;
+
+//======================================================================
 // OS Memory Interface (Linux)
 //======================================================================
-internal void* os_reserve(U64 size) {
+static void* os_reserve(U64 size);
+static void os_commit(void* ptr, U64 size);
+static void os_release(void* ptr, U64 size);
+
+//======================================================================
+// Arena Lifecycle
+//======================================================================
+Arena* arena_create(U64 reserve_size, U64 commit_granularity,
+                          U64 initial_commit, U64 flags);
+void arena_release(Arena* arena);
+Arena *arena_create_scratch_default(void);
+
+//======================================================================
+// Core Allocation
+//======================================================================
+void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill);
+
+//======================================================================
+// Pop / Clear
+//======================================================================
+void arena_pop_to(Arena* arena, U64 pos);
+void arena_clear(Arena* arena);
+U64  arena_pos(Arena* arena);
+
+//======================================================================
+// Temporary Scopes
+//======================================================================
+TempArena arena_temp_begin(Arena* a);
+void arena_temp_end(TempArena t);
+
+//======================================================================
+// String helpers using arena_push()
+//======================================================================
+char *arena_strdup(Arena *a, const char *cstr);
+void *arena_memdup(Arena *a, const void *data, size_t size);
+char *arena_vsprintf(Arena *a, const char *fmt, va_list args);
+char *arena_sprintf(Arena *a, const char *fmt, ...);
+
+//======================================================================
+// Arena-based Dynamic Arrays
+//======================================================================
+#ifndef ARENA_DA_INIT_CAP
+#define ARENA_DA_INIT_CAP 64
+#endif
+
+void* arena_realloc(Arena* a, void* old_ptr,
+                        size_t old_size, size_t new_size);
+
+//======================================================================
+// Arena based helpers
+//======================================================================
+B32 arena_list_filenames(Arena *arena,
+                               const char *path,
+                               StringArray *out);
+StringArray arena_split(Arena *arena, const char *str, const char *delimiters);
+
+//======================================================================
+// Helper macros
+//======================================================================
+#ifdef __cplusplus
+    // C++: we have decltype, use static_cast to the same type as `like`
+#define ARENA_CAST_LIKE(expr, like) ((__typeof__(like))(expr))
+#else
+    // C: implicit void* → T* conversion is fine, just return expr
+    // (or use a C-style cast if you really want)
+    #define ARENA_CAST_LIKE(expr, like) \
+        (expr)
+#endif
+
+#define arena_da_append(a, da, item)                                                          \
+    do {                                                                                      \
+        ARENA_ASSERT((da) != NULL);                                                           \
+        if ((da)->count >= (da)->capacity) {                                                  \
+            size_t new_cap = (da)->capacity == 0 ? ARENA_DA_INIT_CAP : (da)->capacity * 2;    \
+            ARENA_ASSERT(new_cap > (da)->capacity);                                           \
+            (da)->items = ARENA_CAST_LIKE(                                                    \
+                arena_realloc(                                                                \
+                    (a),                                                                      \
+                    (da)->items,                                                              \
+                    (da)->capacity * sizeof(*(da)->items),                                    \
+                    new_cap * sizeof(*(da)->items)                                            \
+                ),                                                                            \
+                (da)->items                                                                   \
+            );                                                                                \
+            ARENA_ASSERT((da)->items != NULL);                                                \
+            (da)->capacity = new_cap;                                                         \
+            ARENA_DEBUG_LOG("da_grow: %p new_cap=%zu", (void*)(da)->items, new_cap);          \
+        }                                                                                     \
+        (da)->items[(da)->count++] = (item);                                                  \
+    } while (0)
+
+#define arena_da_append_many(a, da, new_items, new_count)                                      \
+    do {                                                                                       \
+        ARENA_ASSERT((da) != NULL);                                                            \
+        if ((da)->count + (new_count) > (da)->capacity) {                                      \
+            size_t cap = (da)->capacity ? (da)->capacity : ARENA_DA_INIT_CAP;                 \
+            while ((da)->count + (new_count) > cap) {                                          \
+                ARENA_ASSERT(cap < (SIZE_MAX/2));                                              \
+                cap *= 2;                                                                      \
+            }                                                                                  \
+            (da)->items = arena_realloc(                                  \
+                (a), (da)->items,                                                              \
+                (da)->capacity*sizeof(*(da)->items),                                           \
+                cap*sizeof(*(da)->items));                                                     \
+            ARENA_ASSERT((da)->items != NULL);                                                 \
+            (da)->capacity = cap;                                                              \
+            ARENA_DEBUG_LOG("da_grow_many: %p new_cap=%zu", (void*)(da)->items, cap);          \
+        }                                                                                      \
+        memcpy((da)->items + (da)->count, (new_items), (new_count)*sizeof(*(da)->items));\
+        (da)->count += (new_count);                                                            \
+    } while (0)
+
+#define push_array_no_zero_aligned(a, T, c, align) (T *)arena_push((a), sizeof(T)*(c), (align), (0))
+#define push_array_aligned(a, T, c, align) (T *)arena_push((a), sizeof(T)*(c), (align), (1))
+#define push_array_no_zero(a, T, c) push_array_no_zero_aligned(a, T, c, Max(8, AlignOf(T)))
+#define push_array(a, T, c) push_array_aligned(a, T, c, Max(8, AlignOf(T)))
+
+//======================================================================
+// IMPLEMENTATION
+//======================================================================
+#ifdef ARENA_IMPLEMENTATION
+
+#include <dirent.h>   // opendir, readdir, closedir
+
+static void* os_reserve(U64 size) {
     void* ptr = mmap(NULL, size, PROT_NONE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return (ptr == MAP_FAILED) ? NULL : ptr;
 }
 
-internal void os_commit(void* ptr, U64 size) {
+static void os_commit(void* ptr, U64 size) {
     size = AlignUpPow2(size, (U64)getpagesize());
     if (mprotect(ptr, size, PROT_READ | PROT_WRITE) != 0) {
         fprintf(stderr, "os_commit failed: %s\n", strerror(errno));
@@ -111,15 +258,12 @@ internal void os_commit(void* ptr, U64 size) {
     }
 }
 
-internal void os_release(void* ptr, U64 size) {
+static void os_release(void* ptr, U64 size) {
     munmap(ptr, size);
 }
 
-//======================================================================
-// Arena Lifecycle
-//======================================================================
-internal Arena* arena_create(U64 reserve_size, U64 commit_granularity,
-                                  U64 initial_commit, U64 flags) {
+Arena* arena_create(U64 reserve_size, U64 commit_granularity,
+                          U64 initial_commit, U64 flags) {
     reserve_size       = AlignUpPow2(reserve_size, (U64)getpagesize());
     commit_granularity = AlignUpPow2(commit_granularity, (U64)getpagesize());
     initial_commit     = AlignUpPow2(initial_commit, (U64)getpagesize());
@@ -151,7 +295,7 @@ internal Arena* arena_create(U64 reserve_size, U64 commit_granularity,
     return a;
 }
 
-internal void arena_release(Arena* arena) {
+void arena_release(Arena* arena) {
     for (Arena* a = arena->current; a; ) {
         Arena* prev = a->prev;
         ARENA_DEBUG_LOG("arena_release: %p (%.2f MB)", (void*)a, a->reserved_size / (1024.0*1024.0));
@@ -160,7 +304,7 @@ internal void arena_release(Arena* arena) {
     }
 }
 
-internal Arena *arena_create_scratch_default(void) {
+Arena *arena_create_scratch_default(void) {
     const U64 reserve_size       = 256ULL * 1024 * 1024;
     const U64 commit_granularity = 64ULL  * 1024;
     const U64 initial_commit     = 64ULL  * 1024;
@@ -168,10 +312,7 @@ internal Arena *arena_create_scratch_default(void) {
     return arena_create(reserve_size, commit_granularity, initial_commit, flags);
 }
 
-//======================================================================
-// Core Allocation
-//======================================================================
-internal void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill) {
+void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill) {
     ARENA_ASSERT(arena != NULL);
     Arena* current = arena->current;
     U64 pos_pre = AlignUpPow2(current->pos, align);
@@ -217,10 +358,7 @@ internal void* arena_push(Arena* arena, U64 size, U64 align, B32 zero_fill) {
     return result;
 }
 
-//======================================================================
-// Pop / Clear
-//======================================================================
-internal void arena_pop_to(Arena* arena, U64 pos) {
+void arena_pop_to(Arena* arena, U64 pos) {
     ARENA_ASSERT(arena);
     Arena* current = arena->current;
 
@@ -238,28 +376,17 @@ internal void arena_pop_to(Arena* arena, U64 pos) {
     }
 }
 
-internal void arena_clear(Arena* arena) { arena_pop_to(arena, ARENA_HEADER_SIZE); }
-internal U64  arena_pos(Arena* arena)   { return arena->current->pos; }
+void arena_clear(Arena* arena) { arena_pop_to(arena, ARENA_HEADER_SIZE); }
+U64  arena_pos(Arena* arena)   { return arena->current->pos; }
 
-//======================================================================
-// Temporary Scopes
-//======================================================================
-typedef struct TempArena {
-    Arena* arena;
-    U64 pos;
-} TempArena;
-
-internal TempArena arena_temp_begin(Arena* a) {
+TempArena arena_temp_begin(Arena* a) {
     return (TempArena){a, arena_pos(a)};
 }
-internal void arena_temp_end(TempArena t) {
+void arena_temp_end(TempArena t) {
     arena_pop_to(t.arena, t.pos);
 }
 
-//======================================================================
-// String helpers using arena_push()
-//======================================================================
-internal char *arena_strdup(Arena *a, const char *cstr) {
+char *arena_strdup(Arena *a, const char *cstr) {
     size_t n = strlen(cstr);
     char *dup = (char*)arena_push(a, (U64)(n + 1), 1, false);
     memcpy(dup, cstr, n);
@@ -267,12 +394,12 @@ internal char *arena_strdup(Arena *a, const char *cstr) {
     return dup;
 }
 
-internal void *arena_memdup(Arena *a, const void *data, size_t size) {
+void *arena_memdup(Arena *a, const void *data, size_t size) {
     void *copy = arena_push(a, (U64)size, 8, false);
     return memcpy(copy, data, size);
 }
 
-internal char *arena_vsprintf(Arena *a, const char *fmt, va_list args) {
+char *arena_vsprintf(Arena *a, const char *fmt, va_list args) {
     va_list copy;
     va_copy(copy, args);
     int n = stbsp_vsnprintf(NULL, 0, fmt, copy);
@@ -287,22 +414,15 @@ internal char *arena_vsprintf(Arena *a, const char *fmt, va_list args) {
     return buf;
 }
 
-internal char *arena_sprintf(Arena *a, const char *fmt, ...) {
+char *arena_sprintf(Arena *a, const char *fmt, ...) {
     va_list args; va_start(args, fmt);
     char *res = arena_vsprintf(a, fmt, args);
     va_end(args);
     return res;
 }
 
-//======================================================================
-// Arena-based Dynamic Arrays
-//======================================================================
-#ifndef ARENA_DA_INIT_CAP
-#define ARENA_DA_INIT_CAP 64
-#endif
-
-internal void* arena_realloc(Arena* a, void* old_ptr,
-                                  size_t old_size, size_t new_size) {
+void* arena_realloc(Arena* a, void* old_ptr,
+                        size_t old_size, size_t new_size) {
     ARENA_ASSERT(a != NULL);
     ARENA_ASSERT(new_size > 0);
 
@@ -376,76 +496,9 @@ internal void* arena_realloc(Arena* a, void* old_ptr,
     return new_ptr;
 }
 
-#ifdef __cplusplus
-    // C++: we have decltype, use static_cast to the same type as `like`
-#define ARENA_CAST_LIKE(expr, like) ((__typeof__(like))(expr))
-#else
-    // C: implicit void* → T* conversion is fine, just return expr
-    // (or use a C-style cast if you really want)
-    #define ARENA_CAST_LIKE(expr, like) \
-        (expr)
-#endif
-
-#define arena_da_append(a, da, item)                                                          \
-    do {                                                                                      \
-        ARENA_ASSERT((da) != NULL);                                                           \
-        if ((da)->count >= (da)->capacity) {                                                  \
-            size_t new_cap = (da)->capacity == 0 ? ARENA_DA_INIT_CAP : (da)->capacity * 2;    \
-            ARENA_ASSERT(new_cap > (da)->capacity);                                           \
-            (da)->items = ARENA_CAST_LIKE(                                                    \
-                arena_realloc(                                                                \
-                    (a),                                                                      \
-                    (da)->items,                                                              \
-                    (da)->capacity * sizeof(*(da)->items),                                    \
-                    new_cap * sizeof(*(da)->items)                                            \
-                ),                                                                            \
-                (da)->items                                                                   \
-            );                                                                                \
-            ARENA_ASSERT((da)->items != NULL);                                                \
-            (da)->capacity = new_cap;                                                         \
-            ARENA_DEBUG_LOG("da_grow: %p new_cap=%zu", (void*)(da)->items, new_cap);          \
-        }                                                                                     \
-        (da)->items[(da)->count++] = (item);                                                  \
-    } while (0)
-
-#define arena_da_append_many(a, da, new_items, new_count)                                      \
-    do {                                                                                       \
-        ARENA_ASSERT((da) != NULL);                                                            \
-        if ((da)->count + (new_count) > (da)->capacity) {                                      \
-            size_t cap = (da)->capacity ? (da)->capacity : ARENA_DA_INIT_CAP;                 \
-            while ((da)->count + (new_count) > cap) {                                          \
-                ARENA_ASSERT(cap < (SIZE_MAX/2));                                              \
-                cap *= 2;                                                                      \
-            }                                                                                  \
-            (da)->items = arena_realloc(                                  \
-                (a), (da)->items,                                                              \
-                (da)->capacity*sizeof(*(da)->items),                                           \
-                cap*sizeof(*(da)->items));                                                     \
-            ARENA_ASSERT((da)->items != NULL);                                                 \
-            (da)->capacity = cap;                                                              \
-            ARENA_DEBUG_LOG("da_grow_many: %p new_cap=%zu", (void*)(da)->items, cap);          \
-        }                                                                                      \
-        memcpy((da)->items + (da)->count, (new_items), (new_count)*sizeof(*(da)->items));\
-        (da)->count += (new_count);                                                            \
-    } while (0)
-
-//======================================================================
-// Arena based helpers
-//======================================================================
-
-#include <dirent.h>   // opendir, readdir, closedir
-
-
-typedef struct StringArray {
-    char  **items;
-    size_t  count;
-    size_t  capacity;
-} StringArray;
-// List filenames in `path` into `out`.
-// Returns true on success, false on error.
-internal B32 arena_list_filenames(Arena *arena,
-                                       const char *path,
-                                       StringArray *out)
+B32 arena_list_filenames(Arena *arena,
+                               const char *path,
+                               StringArray *out)
 {
     ARENA_ASSERT(arena != NULL);
     ARENA_ASSERT(path  != NULL);
@@ -487,7 +540,7 @@ internal B32 arena_list_filenames(Arena *arena,
     return true;
 }
 
-internal StringArray arena_split(Arena *arena, const char *str, const char *delimiters) {
+StringArray arena_split(Arena *arena, const char *str, const char *delimiters) {
     ARENA_ASSERT(arena != NULL);
     ARENA_ASSERT(str != NULL);
     ARENA_ASSERT(delimiters != NULL);
@@ -519,9 +572,6 @@ internal StringArray arena_split(Arena *arena, const char *str, const char *deli
     return result;
 }
 
-#define push_array_no_zero_aligned(a, T, c, align) (T *)arena_push((a), sizeof(T)*(c), (align), (0))
-#define push_array_aligned(a, T, c, align) (T *)arena_push((a), sizeof(T)*(c), (align), (1))
-#define push_array_no_zero(a, T, c) push_array_no_zero_aligned(a, T, c, Max(8, AlignOf(T)))
-#define push_array(a, T, c) push_array_aligned(a, T, c, Max(8, AlignOf(T)))
+#endif // ARENA_IMPLEMENTATION
 
-#endif
+#endif // ARENA_H

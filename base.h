@@ -12,8 +12,6 @@
 
 #include "third_party/stb_sprintf.h"
 
-typedef struct Arena Arena;
-
 #define internal      static inline
 #define global        static
 #define local_persist static
@@ -341,29 +339,9 @@ struct DateTime
 
 typedef U64 DenseTime;
 
-typedef U32 FilePropertyFlags;
-enum
-{
-  FilePropertyFlag_IsFolder = (1 << 0),
-};
-
-typedef struct FileProperties FileProperties;
-struct FileProperties
-{
-  U64 size;
-  DenseTime modified;
-  DenseTime created;
-  FilePropertyFlags flags;
-};
-
 internal U16 safe_cast_u16(U32 x);
 internal U32 safe_cast_u32(U64 x);
 internal S32 safe_cast_s32(S64 x);
-
-internal U64 ctz32(U32 val);
-internal U64 ctz64(U64 val);
-internal U64 clz32(U32 val);
-internal U64 clz64(U64 val);
 
 internal DenseTime dense_time_from_date_time(DateTime date_time);
 internal DateTime  date_time_from_dense_time(DenseTime time);

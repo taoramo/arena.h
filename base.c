@@ -1,9 +1,5 @@
 #include "base.h"
 
-# define STB_SPRINTF_IMPLEMENTATION
-# define STB_SPRINTF_STATIC
-# include "third_party/stb_sprintf.h"
-
 internal U16
 safe_cast_u16(U32 x)
 {
